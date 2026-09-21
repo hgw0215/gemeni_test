@@ -158,14 +158,14 @@
     vec3 getDiskPalette(float tempNorm, float rNorm) {
       vec3 innerCol, midCol, outerCol;
       if (u_disk_temp < 0.33) {
-        innerCol = vec3(1.2, 1.4, 1.8); midCol = vec3(0.3, 0.7, 1.2); outerCol = vec3(0.1, 0.2, 0.6);
+        innerCol = vec3(1.05, 1.25, 1.5); midCol = vec3(0.25, 0.6, 1.05); outerCol = vec3(0.08, 0.18, 0.5);
       } else if (u_disk_temp < 0.66) {
-        innerCol = vec3(1.6, 1.4, 1.1); midCol = vec3(1.1, 0.72, 0.22); outerCol = vec3(0.55, 0.2, 0.04);
+        innerCol = vec3(1.22, 1.02, 0.62); midCol = vec3(0.96, 0.56, 0.16); outerCol = vec3(0.48, 0.14, 0.03);
       } else {
-        innerCol = vec3(1.6, 1.2, 0.8); midCol = vec3(1.2, 0.45, 0.1); outerCol = vec3(0.5, 0.08, 0.02);
+        innerCol = vec3(1.25, 0.95, 0.55); midCol = vec3(0.95, 0.35, 0.08); outerCol = vec3(0.42, 0.06, 0.01);
       }
-      if (rNorm < 0.4) return mix(innerCol, midCol, rNorm / 0.4);
-      else return mix(midCol, outerCol, (rNorm - 0.4) / 0.6);
+      if (rNorm < 0.35) return mix(innerCol, midCol, smoothstep(0.0, 0.35, rNorm));
+      else return mix(midCol, outerCol, smoothstep(0.35, 1.0, rNorm));
     }
     void main() {
       vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
@@ -228,18 +228,20 @@
             float cosTheta = dot(vOrbital, toObserver);
             float gamma = 1.0 / sqrt(max(0.01, 1.0 - beta * beta));
             float dopplerDelta = 1.0 / (gamma * (1.0 - beta * cosTheta));
-            float beaming = pow(dopplerDelta, 3.2);
+            float clampedDoppler = clamp(dopplerDelta, 0.45, 1.85);
+            float beaming = pow(clampedDoppler, 2.3);
 
             vec3 baseDiskCol = getDiskPalette(u_disk_temp, rNorm);
             vec3 dopplerColor = baseDiskCol;
             if (dopplerDelta > 1.0) {
-              dopplerColor = mix(baseDiskCol, vec3(1.3, 1.5, 2.0), clamp((dopplerDelta - 1.0) * 0.9, 0.0, 1.0));
+              vec3 radiantGold = mix(baseDiskCol, vec3(1.22, 1.04, 0.64), 0.7);
+              dopplerColor = mix(baseDiskCol, radiantGold, clamp((dopplerDelta - 1.0) * 0.85, 0.0, 1.0));
             } else {
-              dopplerColor = mix(baseDiskCol, vec3(0.8, 0.25, 0.05), clamp((1.0 - dopplerDelta) * 0.9, 0.0, 1.0));
+              dopplerColor = mix(baseDiskCol, vec3(0.65, 0.18, 0.03), clamp((1.0 - dopplerDelta) * 0.95, 0.0, 1.0) * 0.85);
             }
 
-            float diskAlpha = clamp(density * 1.5, 0.0, 0.95);
-            vec3 diskEmission = dopplerColor * density * beaming * 2.2 * u_bloom;
+            float diskAlpha = clamp(density * 1.45, 0.0, 0.94);
+            vec3 diskEmission = dopplerColor * density * beaming * 1.6 * u_bloom;
             accumColor.rgb += (1.0 - accumColor.a) * diskEmission;
             accumColor.a += (1.0 - accumColor.a) * diskAlpha;
             if (accumColor.a > 0.98) break;
@@ -248,17 +250,16 @@
         pos = pos_next; vel = vel_next;
       }
 
-      if (!hitHorizon && minRadiusReached < rs * 1.65 && minRadiusReached > r_horizon) {
-        float photonGlow = pow(clamp(1.0 - (minRadiusReached - r_horizon) / (rs * 0.6), 0.0, 1.0), 5.0);
-        vec3 photonCol = mix(vec3(1.4, 1.3, 1.1), vec3(1.6, 1.7, 2.0), u_disk_temp < 0.33 ? 0.8 : 0.2);
-        accumColor.rgb += (1.0 - accumColor.a) * photonCol * photonGlow * 1.8 * u_bloom;
-        accumColor.a = clamp(accumColor.a + photonGlow * 0.6, 0.0, 1.0);
+      if (!hitHorizon && minRadiusReached > r_horizon && minRadiusReached < rs * 1.35) {
+        float ringDist = abs(minRadiusReached - rs * 1.10);
+        float needleRing = exp(-ringDist * 36.0);
+        vec3 photonCol = mix(vec3(1.22, 0.98, 0.58), vec3(1.28, 1.06, 0.70), u_disk_temp);
+        accumColor.rgb += (1.0 - accumColor.a) * photonCol * needleRing * 1.25 * u_bloom;
+        accumColor.a = clamp(accumColor.a + needleRing * 0.65, 0.0, 1.0);
       }
 
       if (!hitHorizon) {
         accumColor.rgb += (1.0 - accumColor.a) * renderSky(vel);
-      } else {
-        accumColor.rgb *= (1.0 - step(r_horizon, minRadiusReached));
       }
 
       vec3 hdr = accumColor.rgb;
@@ -404,12 +405,12 @@
       isPlaying = !isPlaying;
       document.getElementById('btn-play').innerText = isPlaying ? '暂停自转' : '启动自转';
     });
-    document.getElementById('btn-shot-classic').addEventListener('click', () => targetCam = { dist: 14.5, pitch: 0.18, yaw: 0.45, fov: 46.0 });
+    document.getElementById('btn-shot-classic').addEventListener('click', () => targetCam = { dist: 13.8, pitch: 0.11, yaw: 0.28, fov: 44.0 });
     document.getElementById('btn-shot-equator').addEventListener('click', () => targetCam = { dist: 8.5, pitch: 0.03, yaw: 0.8, fov: 48.0 });
     document.getElementById('btn-shot-top').addEventListener('click', () => targetCam = { dist: 13.8, pitch: 1.35, yaw: 0.0, fov: 52.0 });
     document.getElementById('btn-shot-miller').addEventListener('click', () => targetCam = { dist: 20.0, pitch: -0.22, yaw: 1.65, fov: 42.0 });
     document.getElementById('btn-temp').addEventListener('click', () => { diskTemp = diskTemp === 0.5 ? 0.9 : diskTemp === 0.9 ? 0.1 : 0.5; });
-    document.getElementById('btn-reset').addEventListener('click', () => targetCam = { dist: 14.5, pitch: 0.18, yaw: 0.45, fov: 46.0 });
+    document.getElementById('btn-reset').addEventListener('click', () => targetCam = { dist: 13.8, pitch: 0.11, yaw: 0.28, fov: 44.0 });
 
     let standaloneRecorder = null;
     let standaloneChunks = [];
