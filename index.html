@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>卡冈图雅黑洞自转模拟 - Gargantua Relativistic Black Hole</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #fff; user-select: none; }
+    #canvas-container { position: absolute; inset: 0; width: 100%; height: 100%; }
+    canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+
+    .hud-header {
+      position: absolute; top: 16px; left: 16px; z-index: 10;
+      display: flex; align-items: center; gap: 12px;
+      background: rgba(15, 15, 15, 0.85); backdrop-filter: blur(12px);
+      padding: 8px 16px; border-radius: 9999px; border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .hud-header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: #f59e0b; }
+    .hud-header span { font-size: 11px; color: #a3a3a3; font-family: monospace; }
+
+    .telemetry-card {
+      position: absolute; top: 16px; right: 16px; z-index: 10;
+      background: rgba(15, 15, 15, 0.85); backdrop-filter: blur(12px);
+      padding: 12px 16px; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 11px; line-height: 1.6; color: #d4d4d4; max-width: 260px;
+    }
+    .telemetry-card strong { color: #f59e0b; }
+
+    .controls-bar {
+      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center;
+      background: rgba(15, 15, 15, 0.9); backdrop-filter: blur(16px);
+      padding: 10px 18px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
+    }
+    button {
+      background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 12px; cursor: pointer;
+      display: flex; align-items: center; gap: 6px; transition: all 0.2s;
+    }
+    button:hover { background: rgba(255, 255, 255, 0.18); border-color: rgba(245, 158, 11, 0.5); }
+    button.active { background: rgba(245, 158, 11, 0.25); border-color: #f59e0b; color: #fcd34d; }
+    .btn-play { background: #f59e0b; color: #000; font-weight: 600; border: none; }
+    .btn-play:hover { background: #fbbf24; }
+
+    .instructions {
+      position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: rgba(255, 255, 255, 0.4); pointer-events: none; text-shadow: 0 1px 4px #000;
+    }
+  </style>
+</head>
+<body>
+  <div id="canvas-container">
+    <canvas id="glcanvas"></canvas>
+  </div>
+
+  <div class="hud-header">
+    <h1>卡冈图雅 GARGANTUA</h1>
+    <span>KERR_SPIN: 0.998c</span>
+  </div>
+
+  <div class="telemetry-card">
+    <div>质量: <strong>1.0 × 10⁸ M☉</strong> (一亿倍太阳)</div>
+    <div>自旋: <strong>0.998c</strong> (极端相对论旋转)</div>
+    <div>米勒行星: <strong>1小时 = 地球7年</strong></div>
+    <div>光子球半径: <strong>1.5 rs</strong></div>
+  </div>
+
+  <div class="instructions">🖱️ 按住鼠标左键拖拽旋转视角 | 滚轮缩放景深</div>
+
+  <div class="controls-bar">
+    <button id="btn-play" class="btn-play">暂停/播放</button>
+    <button id="btn-sound">星际管风琴音效</button>
+    <button id="btn-shot-classic" class="active">经典全景</button>
+    <button id="btn-shot-equator">赤道掠影</button>
+    <button id="btn-shot-top">极轴俯瞰</button>
+    <button id="btn-shot-miller">米勒行星</button>
+    <button id="btn-temp">切换色温</button>
+    <button id="btn-record" style="background:#dc2626;border-color:#ef4444;color:#fff;font-weight:600;">录制60FPS视频</button>
+    <button id="btn-reset">复位视角</button>
+  </div>
+
+  <script>
+    const vsSource = `#version 300 es
+    in vec2 a_position;
+    out vec2 v_uv;
+    void main() {
+      v_uv = a_position * 0.5 + 0.5;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`;
+
+    const fsSource = `#version 300 es
+    precision highp float;
+    in vec2 v_uv;
+    out vec4 fragColor;
+    uniform vec2 u_resolution;
+    uniform float u_time;
+    uniform vec3 u_cam_pos;
+    uniform vec3 u_cam_target;
+    uniform float u_fov;
+    uniform float u_spin;
+    uniform float u_disk_speed;
+    uniform float u_disk_temp;
+    uniform float u_doppler;
+    uniform float u_bloom;
+    uniform float u_lensing;
+    uniform float u_starfield;
+    uniform int u_max_steps;
+
+    float hash12(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+    float hash13(vec3 p) {
+      p = fract(p * 0.1031);
+      p += dot(p, p.zyx + 31.32);
+      return fract((p.x + p.y) * p.z);
+    }
+    float noise2D(vec2 p) {
+      vec2 i = floor(p); vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash12(i); float b = hash12(i + vec2(1.0, 0.0));
+      float c = hash12(i + vec2(0.0, 1.0)); float d = hash12(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float diskTurbulence(vec2 p) {
+      float v = 0.0; float a = 0.5;
+      mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+      for (int i = 0; i < 4; i++) {
+        v += a * noise2D(p);
+        p = rot * p * 2.05;
+        a *= 0.5;
+      }
+      return v;
+    }
+    vec3 renderSky(vec3 dir) {
+      float nebula1 = noise2D(dir.xy * 2.5 + vec2(dir.z * 1.5));
+      float nebula2 = noise2D(dir.yz * 3.0);
+      vec3 cosmicDust = vec3(0.015, 0.012, 0.025) * nebula1 + vec3(0.02, 0.015, 0.035) * nebula2;
+      vec3 p = dir * 140.0; vec3 ip = floor(p);
+      float h = hash13(ip); vec3 stars = vec3(0.0);
+      if (h > 0.965) {
+        vec3 fp = fract(p) - 0.5; float dist = length(fp);
+        float brightness = pow(hash13(ip + 17.1), 12.0) * 1.6;
+        float starGlow = smoothstep(0.3, 0.0, dist) * brightness;
+        float colType = hash13(ip + 41.5);
+        vec3 starCol = mix(vec3(0.7, 0.85, 1.0), vec3(1.0, 0.92, 0.8), colType);
+        if (colType > 0.8) starCol = vec3(1.0, 0.65, 0.45);
+        stars = starCol * starGlow;
+      }
+      float galPlane = exp(-abs(dir.y) * 4.0);
+      vec3 galBand = vec3(0.04, 0.035, 0.05) * galPlane * (0.6 + 0.4 * nebula1);
+      return (cosmicDust + stars + galBand) * u_starfield;
+    }
+    vec3 getDiskPalette(float tempNorm, float rNorm) {
+      vec3 innerCol, midCol, outerCol;
+      if (u_disk_temp < 0.33) {
+        innerCol = vec3(1.2, 1.4, 1.8); midCol = vec3(0.3, 0.7, 1.2); outerCol = vec3(0.1, 0.2, 0.6);
+      } else if (u_disk_temp < 0.66) {
+        innerCol = vec3(1.6, 1.4, 1.1); midCol = vec3(1.1, 0.72, 0.22); outerCol = vec3(0.55, 0.2, 0.04);
+      } else {
+        innerCol = vec3(1.6, 1.2, 0.8); midCol = vec3(1.2, 0.45, 0.1); outerCol = vec3(0.5, 0.08, 0.02);
+      }
+      if (rNorm < 0.4) return mix(innerCol, midCol, rNorm / 0.4);
+      else return mix(midCol, outerCol, (rNorm - 0.4) / 0.6);
+    }
+    void main() {
+      vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
+      vec3 camOrigin = u_cam_pos;
+      vec3 forward = normalize(u_cam_target - camOrigin);
+      vec3 worldUp = vec3(0.0, 1.0, 0.0);
+      vec3 right = normalize(cross(forward, worldUp));
+      vec3 up = cross(right, forward);
+      float tanHalfFov = tan(radians(u_fov) * 0.5);
+      vec3 rayDir = normalize(forward + right * uv.x * tanHalfFov * (u_resolution.x / u_resolution.y) + up * uv.y * tanHalfFov);
+
+      const float rs = 1.6;
+      const float r_horizon = rs * 1.02;
+      const float r_in = rs * 1.55;
+      const float r_out = rs * 5.4;
+      const float r_escape = 24.0;
+
+      vec3 pos = camOrigin; vec3 vel = rayDir;
+      vec4 accumColor = vec4(0.0);
+      float minRadiusReached = 1000.0;
+      bool hitHorizon = false;
+
+      for (int i = 0; i < 84; i++) {
+        float r = length(pos);
+        if (r < minRadiusReached) minRadiusReached = r;
+        if (r <= r_horizon) { hitHorizon = true; break; }
+        if (r > r_escape) break;
+
+        vec3 L = cross(pos, vel);
+        float L2 = dot(L, L);
+        float r5 = r * r * r * r * r;
+        vec3 accel = -1.5 * rs * u_lensing * (L2 / max(r5, 0.001)) * pos;
+        float ds = clamp((r - r_horizon) * 0.085, 0.022, 0.38);
+
+        vec3 vel_next = normalize(vel + accel * ds);
+        vec3 pos_next = pos + vel_next * ds;
+
+        if (pos.y * pos_next.y <= 0.0 && abs(pos_next.y - pos.y) > 0.00001) {
+          float t = -pos.y / (pos_next.y - pos.y);
+          vec3 hitPos = mix(pos, pos_next, t);
+          float hitR = length(hitPos.xz);
+          if (hitR >= r_in && hitR <= r_out) {
+            float rNorm = (hitR - r_in) / (r_out - r_in);
+            float radialProfile = smoothstep(0.0, 0.08, rNorm) * pow(1.0 - rNorm, 1.2) * (1.0 / pow(hitR / rs, 1.4));
+            float omega = (1.55 / pow(hitR / rs, 1.5)) * sign(u_spin);
+            float angle = atan(hitPos.z, hitPos.x);
+            float phi = angle - omega * u_time * u_disk_speed * 1.5;
+            vec2 rotP = vec2(cos(phi), sin(phi)) * (hitR * 0.95);
+            float turb = diskTurbulence(rotP * 1.4);
+            float logR = log(max(0.1, hitR / rs));
+            float arm1 = sin(2.0 * phi - 2.8 * logR);
+            float arm2 = sin(4.0 * phi - 5.5 * logR + 1.2);
+            float spiralWaves = 0.65 * arm1 + 0.35 * arm2;
+            float rings = pow(sin((hitR / rs) * 32.0 + turb * 2.2 + spiralWaves * 1.1) * 0.5 + 0.5, 2.2);
+            float density = radialProfile * (0.60 + 0.38 * turb + 0.22 * rings + 0.16 * spiralWaves);
+
+            vec3 vOrbital = normalize(vec3(-hitPos.z, 0.0, hitPos.x)) * sign(u_spin);
+            float beta = clamp(0.55 / sqrt(hitR / rs), 0.12, 0.62);
+            vec3 toObserver = -normalize(vel);
+            float cosTheta = dot(vOrbital, toObserver);
+            float gamma = 1.0 / sqrt(max(0.01, 1.0 - beta * beta));
+            float dopplerDelta = 1.0 / (gamma * (1.0 - beta * cosTheta));
+            float beaming = pow(dopplerDelta, 3.2);
+
+            vec3 baseDiskCol = getDiskPalette(u_disk_temp, rNorm);
+            vec3 dopplerColor = baseDiskCol;
+            if (dopplerDelta > 1.0) {
+              dopplerColor = mix(baseDiskCol, vec3(1.3, 1.5, 2.0), clamp((dopplerDelta - 1.0) * 0.9, 0.0, 1.0));
+            } else {
+              dopplerColor = mix(baseDiskCol, vec3(0.8, 0.25, 0.05), clamp((1.0 - dopplerDelta) * 0.9, 0.0, 1.0));
+            }
+
+            float diskAlpha = clamp(density * 1.5, 0.0, 0.95);
+            vec3 diskEmission = dopplerColor * density * beaming * 2.2 * u_bloom;
+            accumColor.rgb += (1.0 - accumColor.a) * diskEmission;
+            accumColor.a += (1.0 - accumColor.a) * diskAlpha;
+            if (accumColor.a > 0.98) break;
+          }
+        }
+        pos = pos_next; vel = vel_next;
+      }
+
+      if (!hitHorizon && minRadiusReached < rs * 1.65 && minRadiusReached > r_horizon) {
+        float photonGlow = pow(clamp(1.0 - (minRadiusReached - r_horizon) / (rs * 0.6), 0.0, 1.0), 5.0);
+        vec3 photonCol = mix(vec3(1.4, 1.3, 1.1), vec3(1.6, 1.7, 2.0), u_disk_temp < 0.33 ? 0.8 : 0.2);
+        accumColor.rgb += (1.0 - accumColor.a) * photonCol * photonGlow * 1.8 * u_bloom;
+        accumColor.a = clamp(accumColor.a + photonGlow * 0.6, 0.0, 1.0);
+      }
+
+      if (!hitHorizon) {
+        accumColor.rgb += (1.0 - accumColor.a) * renderSky(vel);
+      } else {
+        accumColor.rgb *= (1.0 - step(r_horizon, minRadiusReached));
+      }
+
+      vec3 hdr = accumColor.rgb;
+      vec3 mapped = (hdr * (2.51 * hdr + 0.03)) / (hdr * (2.43 * hdr + 0.59) + 0.14);
+      mapped = clamp(mapped, 0.0, 1.0);
+      float vignette = 1.0 - dot(uv * 0.6, uv * 0.6);
+      fragColor = vec4(mapped * clamp(vignette, 0.0, 1.0), 1.0);
+    }`;
+
+    const canvas = document.getElementById('glcanvas');
+    const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, powerPreference: 'high-performance' });
+
+    function createShader(type, src) {
+      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      return s;
+    }
+    const vs = createShader(gl.VERTEX_SHADER, vsSource);
+    const fs = createShader(gl.FRAGMENT_SHADER, fsSource);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog); gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+    const posLoc = gl.getAttribLocation(prog, 'a_position');
+    gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    const uRes = gl.getUniformLocation(prog, 'u_resolution');
+    const uTime = gl.getUniformLocation(prog, 'u_time');
+    const uCamPos = gl.getUniformLocation(prog, 'u_cam_pos');
+    const uCamTarget = gl.getUniformLocation(prog, 'u_cam_target');
+    const uFov = gl.getUniformLocation(prog, 'u_fov');
+    const uSpin = gl.getUniformLocation(prog, 'u_spin');
+    const uSpeed = gl.getUniformLocation(prog, 'u_disk_speed');
+    const uTemp = gl.getUniformLocation(prog, 'u_disk_temp');
+    const uDoppler = gl.getUniformLocation(prog, 'u_doppler');
+    const uBloom = gl.getUniformLocation(prog, 'u_bloom');
+    const uLensing = gl.getUniformLocation(prog, 'u_lensing');
+    const uStars = gl.getUniformLocation(prog, 'u_starfield');
+    const uSteps = gl.getUniformLocation(prog, 'u_max_steps');
+
+    let isPlaying = true;
+    let diskTemp = 0.5;
+    let cam = { dist: 14.5, pitch: 0.18, yaw: 0.45, fov: 46.0 };
+    let targetCam = { ...cam };
+    let isDragging = false;
+    let lastX = 0, lastY = 0;
+    let simTime = 0;
+    let lastT = performance.now();
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
+      const w = Math.floor(canvas.clientWidth * dpr);
+      const h = Math.floor(canvas.clientHeight * dpr);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h);
+      }
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    canvas.addEventListener('pointerdown', (e) => { isDragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      targetCam.yaw += (e.clientX - lastX) * 0.005;
+      targetCam.pitch = Math.max(-1.42, Math.min(1.42, targetCam.pitch - (e.clientY - lastY) * 0.005));
+      lastX = e.clientX; lastY = e.clientY;
+    });
+    window.addEventListener('pointerup', () => isDragging = false);
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      targetCam.dist = Math.max(4.5, Math.min(30.0, targetCam.dist * (1 + e.deltaY * 0.002)));
+    }, { passive: false });
+
+    function render(now) {
+      const dt = Math.min((now - lastT) * 0.001, 0.1);
+      lastT = now;
+      if (isPlaying) {
+        simTime += dt;
+        if (!isDragging) targetCam.yaw += dt * 0.025;
+      }
+      cam.yaw += (targetCam.yaw - cam.yaw) * 0.08;
+      cam.pitch += (targetCam.pitch - cam.pitch) * 0.08;
+      cam.dist += (targetCam.dist - cam.dist) * 0.08;
+      cam.fov += (targetCam.fov - cam.fov) * 0.08;
+
+      const cx = targetCam.dist * Math.cos(cam.pitch) * Math.sin(cam.yaw);
+      const cy = targetCam.dist * Math.sin(cam.pitch);
+      const cz = targetCam.dist * Math.cos(cam.pitch) * Math.cos(cam.yaw);
+
+      gl.uniform2f(uRes, canvas.width, canvas.height);
+      gl.uniform1f(uTime, simTime);
+      gl.uniform3f(uCamPos, cx, cy, cz);
+      gl.uniform3f(uCamTarget, 0, 0, 0);
+      gl.uniform1f(uFov, cam.fov);
+      gl.uniform1f(uSpin, 0.998);
+      gl.uniform1f(uSpeed, 1.0);
+      gl.uniform1f(uTemp, diskTemp);
+      gl.uniform1f(uDoppler, 1.0);
+      gl.uniform1f(uBloom, 1.0);
+      gl.uniform1f(uLensing, 1.0);
+      gl.uniform1f(uStars, 1.0);
+      gl.uniform1i(uSteps, 84);
+
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    let audioCtx = null;
+    document.getElementById('btn-sound').addEventListener('click', () => {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const chords = [[146.83, 220, 261.63, 293.66], [174.61, 220, 261.63, 349.23], [130.81, 196, 261.63, 329.63]];
+        const master = audioCtx.createGain(); master.gain.value = 0.25; master.connect(audioCtx.destination);
+        const sub = audioCtx.createOscillator(); sub.type = 'sine'; sub.frequency.value = 73.42; sub.connect(master); sub.start();
+        const oscs = chords[0].map(f => {
+          const osc = audioCtx.createOscillator(); osc.type = 'sawtooth'; osc.frequency.value = f;
+          const g = audioCtx.createGain(); g.gain.value = 0.08; osc.connect(g); g.connect(master); osc.start(); return osc;
+        });
+        let chordIdx = 0;
+        setInterval(() => {
+          chordIdx = (chordIdx + 1) % chords.length; const n = chords[chordIdx];
+          oscs.forEach((osc, i) => osc.frequency.setTargetAtTime(n[i], audioCtx.currentTime, 1.5));
+          sub.frequency.setTargetAtTime(n[0] * 0.5, audioCtx.currentTime, 1.5);
+        }, 6000);
+        document.getElementById('btn-sound').classList.add('active');
+        document.getElementById('btn-sound').innerText = '星际原声 (播放中)';
+      } else {
+        if (audioCtx.state === 'running') {
+          audioCtx.suspend();
+          document.getElementById('btn-sound').classList.remove('active');
+          document.getElementById('btn-sound').innerText = '星际管风琴音效';
+        } else {
+          audioCtx.resume();
+          document.getElementById('btn-sound').classList.add('active');
+          document.getElementById('btn-sound').innerText = '星际原声 (播放中)';
+        }
+      }
+    });
+
+    document.getElementById('btn-play').addEventListener('click', () => {
+      isPlaying = !isPlaying;
+      document.getElementById('btn-play').innerText = isPlaying ? '暂停自转' : '启动自转';
+    });
+    document.getElementById('btn-shot-classic').addEventListener('click', () => targetCam = { dist: 14.5, pitch: 0.18, yaw: 0.45, fov: 46.0 });
+    document.getElementById('btn-shot-equator').addEventListener('click', () => targetCam = { dist: 8.5, pitch: 0.03, yaw: 0.8, fov: 48.0 });
+    document.getElementById('btn-shot-top').addEventListener('click', () => targetCam = { dist: 13.8, pitch: 1.35, yaw: 0.0, fov: 52.0 });
+    document.getElementById('btn-shot-miller').addEventListener('click', () => targetCam = { dist: 20.0, pitch: -0.22, yaw: 1.65, fov: 42.0 });
+    document.getElementById('btn-temp').addEventListener('click', () => { diskTemp = diskTemp === 0.5 ? 0.9 : diskTemp === 0.9 ? 0.1 : 0.5; });
+    document.getElementById('btn-reset').addEventListener('click', () => targetCam = { dist: 14.5, pitch: 0.18, yaw: 0.45, fov: 46.0 });
+
+    let standaloneRecorder = null;
+    let standaloneChunks = [];
+    document.getElementById('btn-record').addEventListener('click', () => {
+      const btn = document.getElementById('btn-record');
+      if (standaloneRecorder && standaloneRecorder.state === 'recording') {
+        standaloneRecorder.stop();
+        btn.innerText = '录制60FPS视频';
+        btn.style.background = '#dc2626';
+        return;
+      }
+      try {
+        const stream = canvas.captureStream(60);
+        let mime = 'video/webm;codecs=vp9';
+        if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
+        standaloneRecorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 16000000 });
+        standaloneChunks = [];
+        standaloneRecorder.ondataavailable = (e) => { if (e.data.size > 0) standaloneChunks.push(e.data); };
+        standaloneRecorder.onstop = () => {
+          const blob = new Blob(standaloneChunks, { type: mime });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'gargantua-blackhole-60fps.webm';
+          a.click();
+        };
+        standaloneRecorder.start();
+        btn.innerText = '停止录制并下载 (REC)';
+        btn.style.background = '#991b1b';
+      } catch (e) {
+        alert('浏览器暂不支持直接录制，请使用最新版Chrome或Edge。');
+      }
+    });
+  </script>
+</body>
+</html>
